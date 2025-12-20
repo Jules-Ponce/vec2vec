@@ -30,11 +30,11 @@ Most of the experiments in the paper use `configs/unsupervised.toml`.
 ### Command Line Arguments
 
 Each entry in the toml configuration can be altered in two ways: (1) by directly changing the configuration file, or (2) adding a flag to the run command above.
-The `train.py` script with accepts various parameters, including:
+The `train.py` script accepts various parameters, including:
 
 #### General Settings
 - `--num_points`: Number of points to allocate to each encoder
-- `--unsup_points`: Number of points to allocate to the unsupervised encoder (the supervised recieves the rest)
+- `--unsup_points`: Number of points to allocate to the unsupervised encoder (the supervised receives the rest)
 - `--unsup_emb`: Unsupervised embedding model (e.g., 'gte')
 - `--sup_emb`: Supervised embedding model (e.g., 'gtr')
 - `--dataset`: Dataset to use (e.g., "nq")
