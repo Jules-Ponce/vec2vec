@@ -76,15 +76,9 @@ def load_n_translator(cfg, encoder_dims):
 def get_inverters(emb_flags, device='cpu'):
     assert isinstance(emb_flags, list)
     inverters = {}
-    for emb_flag in emb_flags:
-        assert emb_flag in ['gtr', 'gte']
-        if emb_flag == "gtr":
-            # inversion_model = InversionModel.from_pretrained("jxm/gtr-32-noise-0.001")
-            # inversion_model = InversionModel.from_pretrained("ielabgroup/vec2text_gtr-base-st_corrector")
-            inversion_model = InversionModel.from_pretrained("ielabgroup/vec2text_gtr-base-st_inversion")
-
-        elif emb_flag == 'gte':
-            inversion_model = InversionModel.from_pretrained("jxm/gte-32-noise-0.001")
+    for emb_flag in emb_flags:    # only gtr for now, extend to other models as applicable
+        assert emb_flag == 'gtr'
+        inversion_model = InversionModel.from_pretrained("ielabgroup/vec2text_gtr-base-st_inversion")
         inversion_model.eval()
         inverters[emb_flag] = inversion_model.to(device)
     return inverters
