@@ -13,10 +13,19 @@ import torch
 from torch.optim.lr_scheduler import LambdaLR
 
 from translators.Discriminator import Discriminator
+from typing import Literal
+
 
 # from eval import eval_model
-from utils.collate import MultiencoderTokenizedDataset, TokenizedCollator
-from utils.eval_utils import EarlyStopper, eval_loop_
+from utils.collate import (
+    MultiencoderTokenizedDataset,
+    UnpairedEmbeddingDataset,
+    LabeledEmbeddingDataset,
+    UnsupervisedEmbeddingDataset,
+    SupervisedEmbeddingDataset,
+    split_dataset,
+)  # , TokenizedCollator
+from utils.eval_utils import EarlyStopper, eval_loop_, validation_loop
 from utils.gan import LeastSquaresGAN, RelativisticGAN, VanillaGAN
 from utils.model_utils import get_sentence_embedding_dimension, load_encoder
 from utils.utils import *
@@ -25,6 +34,9 @@ from utils.train_utils import rec_loss_fn, trans_loss_fn, vsp_loss_fn, get_grad_
 from utils.wandb_logger import Logger
 
 from datasets import load_from_disk
+
+DataType = Literal["archaea", "flowers", "insects", "mammals", "vertebrae"]
+ALLOWED_DATATYPES = ("archaea", "flowers", "insects", "mammals", "vertebrae")
 
 
 def training_loop_(
@@ -38,8 +50,8 @@ def training_loop_(
     sup_dataloader,
     sup_iter,
     unsup_dataloader,
-    sup_encs,
-    unsup_enc,
+    sup_encs,  # None
+    unsup_enc,  # None
     cfg,
     opt,
     scheduler,
@@ -80,11 +92,16 @@ def training_loop_(
             print(f"Early stopping at {i} batches")
             break
         with accelerator.accumulate(translator), accelerator.autocast():
+            print("sup_batch keys:", sup_batch.keys())
+            print("unsup_batch keys:", unsup_batch.keys())
+
             assert len(set(sup_batch.keys()).intersection(unsup_batch.keys())) == 0
             ins = {
-                **process_batch(sup_batch, sup_encs, cfg.normalize_embeddings, device),
                 **process_batch(
-                    unsup_batch, unsup_enc, cfg.normalize_embeddings, device
+                    sup_batch, sup_encs, cfg.normalize_embeddings, device=device
+                ),
+                **process_batch(
+                    unsup_batch, unsup_enc, cfg.normalize_embeddings, device=device
                 ),
             }
 
@@ -304,13 +321,21 @@ def main():
             "Note: bf16 is not available on this hardware! Reverting to fp16 and setting accumulation steps to 1."
         )
 
+    if cfg.dataset not in ALLOWED_DATATYPES:
+        raise ValueError(
+            f"Invalid datatype '{cfg.dataset}'. "
+            f"Expected one of: {', '.join(ALLOWED_DATATYPES)}"
+        )
+
     # set seeds
     random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
     torch.cuda.manual_seed(cfg.seed)
 
-    use_val_set = hasattr(cfg, "val_size")
+    use_val_set = hasattr(cfg, "val_size") or (
+        hasattr(cfg, "val_fraction") and cfg.val_fraction > 0
+    )
 
     accelerator = accelerate.Accelerator(
         mixed_precision=(
@@ -344,17 +369,12 @@ def main():
 
     print("Running Experiment:", cfg.wandb_name)
 
-    sup_encs = {
-        cfg.sup_emb: load_encoder(
-            cfg.sup_emb,
-            mixed_precision=(
-                cfg.mixed_precision if hasattr(cfg, "mixed_precision") else None
-            ),
-        )
-    }
-    encoder_dims = {
-        cfg.sup_emb: get_sentence_embedding_dimension(sup_encs[cfg.sup_emb])
-    }
+    sup_encs = {cfg.sup_emb: None}
+    unsup_enc = {cfg.unsup_emb: None}
+
+    encoder_dims = {cfg.sup_emb: cfg.sup_dim}
+    unsup_dim = {cfg.unsup_emb: cfg.unsup_dim}
+
     translator = load_n_translator(cfg, encoder_dims)
 
     model_save_dir = os.path.join(save_dir, "model.pt")
@@ -365,17 +385,6 @@ def main():
     assert hasattr(cfg, "unsup_emb")
     assert cfg.sup_emb != cfg.unsup_emb
 
-    unsup_enc = {
-        cfg.unsup_emb: load_encoder(
-            cfg.unsup_emb,
-            mixed_precision=(
-                cfg.mixed_precision if hasattr(cfg, "mixed_precision") else None
-            ),
-        )
-    }
-    unsup_dim = {
-        cfg.unsup_emb: get_sentence_embedding_dimension(unsup_enc[cfg.unsup_emb])
-    }
     translator.add_encoders(unsup_dim, overwrite_embs=[cfg.unsup_emb])
 
     assert cfg.unsup_emb not in sup_encs
@@ -398,113 +407,68 @@ def main():
     )
 
     num_workers = min(get_num_proc(), 8)
-    if cfg.dataset != "mimic":
-        dset = load_streaming_embeddings(cfg.dataset)
-        print(f"Using {num_workers} workers and {len(dset)} datapoints")
 
-        dset_dict = dset.train_test_split(
-            test_size=cfg.val_size, seed=cfg.val_dataset_seed
-        )
-        dset = dset_dict["train"]
-        valset = dset_dict["test"]
+    # -------------------------------------------------
+    # Load biological embedding datasets
+    # -------------------------------------------------
+    cell_embeddings = np.load("data/1000_sampled_sc_embeddings.npy")
 
-        assert hasattr(cfg, "num_points") or hasattr(cfg, "unsup_points")
-        dset = dset.shuffle(seed=cfg.train_dataset_seed)
-        if hasattr(cfg, "num_points"):
-            assert cfg.num_points > 0 and cfg.num_points <= len(dset) // 2
-            supset = dset.select(range(cfg.num_points))
-            unsupset = dset.select(range(cfg.num_points, cfg.num_points * 2))
-        elif hasattr(cfg, "unsup_points"):
-            unsupset = dset.select(range(min(cfg.unsup_points, len(dset))))
-            supset = dset.select(
-                range(min(cfg.unsup_points, len(dset)), len(dset) - len(unsupset))
-            )
-    else:
-        supset = (
-            load_from_disk("data/mimic")["supervised"]
-            .shuffle(cfg.train_dataset_seed)
-            .select(range(cfg.num_points))
-        )
-        unsupset = (
-            load_from_disk("data/mimic")["unsupervised"]
-            .shuffle(cfg.train_dataset_seed)
-            .select(range(cfg.num_points))
-        )
-        valset = (
-            load_from_disk("data/mimic")["evaluation"]
-            .shuffle(cfg.val_dataset_seed)
-            .select(range(cfg.val_size))
-        )
-
-        # for each, drop all columns but 'text' using remove_columns
-        supset = supset.remove_columns(
-            [col for col in supset.column_names if col != "text"]
-        )
-        unsupset = unsupset.remove_columns(
-            [col for col in unsupset.column_names if col != "text"]
-        )
-        valset = valset.remove_columns(
-            [col for col in valset.column_names if col != "text"]
-        )
-
-    supset = MultiencoderTokenizedDataset(
-        dataset=supset,
-        encoders=sup_encs,
-        n_embs_per_batch=cfg.n_embs_per_batch,
-        batch_size=cfg.bs,
-        max_length=cfg.max_seq_length,
-        seed=cfg.sampling_seed,
+    protein_embeddings = np.load(
+        f"data/{cfg.dataset}/1000_sampled_protein_embeddings.npy"
     )
-    unsupset = MultiencoderTokenizedDataset(
-        dataset=unsupset,
-        encoders=unsup_enc,
-        n_embs_per_batch=1,
-        batch_size=cfg.bs,
-        max_length=cfg.max_seq_length,
-        seed=cfg.sampling_seed,
+    protein_labels = np.load(
+        f"data/{cfg.dataset}/1000_sampled_protein_labels.npy",
+        allow_pickle=True,
+    )
+
+    supset = SupervisedEmbeddingDataset(
+        protein_embeddings,
+        protein_labels,
+        emb_name=cfg.sup_emb,
+    )
+
+    unsupset = UnsupervisedEmbeddingDataset(
+        cell_embeddings,
+        emb_name=cfg.unsup_emb,
+    )
+
+    supset, sup_valset = split_dataset(supset, cfg.val_fraction, cfg.val_dataset_seed)
+
+    unsupset, unsup_valset = split_dataset(
+        unsupset, cfg.val_fraction, cfg.val_dataset_seed
     )
 
     sup_dataloader = DataLoader(
         supset,
         batch_size=cfg.bs,
-        num_workers=num_workers // 2,
         shuffle=True,
-        pin_memory=True,
-        prefetch_factor=None,
-        collate_fn=TokenizedCollator(),
         drop_last=True,
     )
     unsup_dataloader = DataLoader(
         unsupset,
         batch_size=cfg.bs,
-        num_workers=num_workers // 2,
         shuffle=True,
-        pin_memory=True,
-        prefetch_factor=None,
-        collate_fn=TokenizedCollator(),
         drop_last=True,
     )
 
     if use_val_set:
-        valset = MultiencoderTokenizedDataset(
-            dataset=valset,
-            encoders={**unsup_enc, **sup_encs},
-            n_embs_per_batch=2,
+        sup_valloader = DataLoader(
+            sup_valset,
             batch_size=cfg.val_bs,
-            max_length=cfg.max_seq_length,
-            seed=cfg.sampling_seed,
-        )
-        valloader = DataLoader(
-            valset,
-            batch_size=cfg.val_bs if hasattr(cfg, "val_bs") else cfg.bs,
-            num_workers=num_workers,
             shuffle=False,
-            pin_memory=True,
-            prefetch_factor=(8 if num_workers > 0 else None),
-            collate_fn=TokenizedCollator(),
-            drop_last=True,
+            drop_last=False,
         )
-        valloader = accelerator.prepare(valloader)
+
+        unsup_valloader = DataLoader(
+            unsup_valset,
+            batch_size=cfg.val_bs,
+            shuffle=False,
+            drop_last=False,
+        )
+
+        sup_valloader, unsup_valloader = accelerator.prepare(
+            sup_valloader, unsup_valloader
+        )
 
     opt = torch.optim.Adam(
         translator.parameters(), lr=cfg.lr, fused=False, betas=(0.5, 0.999)
@@ -594,7 +558,7 @@ def main():
     latent_disc_scheduler = LambdaLR(latent_disc_opt, lr_lambda=lr_lambda)
     similarity_disc_scheduler = LambdaLR(similarity_disc_opt, lr_lambda=lr_lambda)
 
-    if cfg.finetune_mode:
+    if 0:  # cfg.finetune_mode:
         assert hasattr(cfg, "load_dir")
         print(f"Loading models from {cfg.load_dir}...")
         translator.load_state_dict(
@@ -679,46 +643,28 @@ def main():
     for epoch in range(max_num_epochs):
         if use_val_set:
             with torch.no_grad(), accelerator.autocast():
-                translator.eval()
-                val_res = {}
-                recons, trans, heatmap_dict, _, _, _ = eval_loop_(
-                    cfg,
-                    translator,
-                    {**sup_encs, **unsup_enc},
-                    valloader,
+
+                val_res = validation_loop(
+                    translator=translator,
+                    sup_valloader=sup_valloader,
+                    unsup_valloader=unsup_valloader,
+                    cfg=cfg,
                     device=accelerator.device,
                 )
-                for flag, res in recons.items():
-                    for k, v in res.items():
-                        if k == "cos":
-                            val_res[f"val/rec_{flag}_{k}"] = v
-                for target_flag, d in trans.items():
-                    for flag, res in d.items():
-                        for k, v in res.items():
-                            if flag == cfg.unsup_emb and target_flag == cfg.unsup_emb:
-                                continue
-                            val_res[f"val/{flag}_{target_flag}_{k}"] = v
 
-                if len(heatmap_dict) > 0:
-                    for k, v in heatmap_dict.items():
-                        if "heatmap" in k and "top" not in k:
-                            v = wandb.Image(v)
-                            val_res[f"val/{k}"] = v
-                        else:
-                            val_res[f"val/{k} (avg. {cfg.top_k_batches} batches)"] = v
-                wandb.log(val_res)
-                translator.train()
+                for k, v in val_res.items():
+                    logger.logkv(k, v)
+
+                logger.dumpkvs()
 
             if epoch >= cfg.min_epochs and early_stopping:
-                score = np.mean([v for k, v in val_res.items() if "top_rank" in k])
+                score = val_res["val/rec_loss"]
 
                 if early_stopper.early_stop(score):
                     print("Early stopping...")
                     break
+
                 if early_stopper.counter == 0 and score < early_stopper.opt_val:
-                    print(
-                        f"Saving model (counter = {early_stopper.counter})... {score} < {early_stopper.opt_val} is the best score so far..."
-                    )
                     save_everything(
                         cfg,
                         translator,
@@ -729,7 +675,7 @@ def main():
 
         max_num_batches = None
         print(
-            f"Epoch",
+            "Epoch",
             epoch,
             "max_num_batches",
             max_num_batches,
