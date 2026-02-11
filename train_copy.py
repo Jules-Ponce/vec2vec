@@ -35,8 +35,15 @@ from utils.wandb_logger import Logger
 
 from datasets import load_from_disk
 
-DataType = Literal["archaea", "flowers", "insects", "mammals", "vertebrae"]
-ALLOWED_DATATYPES = ("archaea", "flowers", "insects", "mammals", "vertebrae")
+DataType = Literal["archaea", "flowers", "insects", "mammals", "vertebrae", "swissprot"]
+ALLOWED_DATATYPES = (
+    "archaea",
+    "flowers",
+    "insects",
+    "mammals",
+    "vertebrae",
+    "swissprot",
+)
 
 
 def training_loop_(
@@ -92,8 +99,8 @@ def training_loop_(
             print(f"Early stopping at {i} batches")
             break
         with accelerator.accumulate(translator), accelerator.autocast():
-            print("sup_batch keys:", sup_batch.keys())
-            print("unsup_batch keys:", unsup_batch.keys())
+            # print("sup_batch keys:", sup_batch.keys())
+            # print("unsup_batch keys:", unsup_batch.keys())
 
             assert len(set(sup_batch.keys()).intersection(unsup_batch.keys())) == 0
             ins = {
@@ -411,6 +418,7 @@ def main():
     # -------------------------------------------------
     # Load biological embedding datasets
     # -------------------------------------------------
+
     cell_embeddings = np.load("data/1000_sampled_sc_embeddings.npy")
 
     protein_embeddings = np.load(
