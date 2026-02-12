@@ -9,6 +9,7 @@ Created on Wed Sep 23 18:33:22 2020
 import argparse
 import time
 from pathlib import Path
+import gzip
 
 import torch
 import h5py
@@ -44,7 +45,7 @@ def read_fasta(fasta_path):
     """
 
     sequences = dict()
-    with open(fasta_path, "r") as fasta_f:
+    with gzip.open(fasta_path, "rt") as fasta_f:
         for line in fasta_f:
             # get uniprot ID from header and create new entry
             if line.startswith(">"):
