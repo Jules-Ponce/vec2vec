@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 import gzip
 
+from tqdm import tqdm
 import torch
 import h5py
 from transformers import T5EncoderModel, T5Tokenizer
@@ -99,7 +100,7 @@ def get_embeddings(
 
     start = time.time()
     batch = list()
-    for seq_idx, (pdb_id, seq) in enumerate(seq_dict, 1):
+    for seq_idx, (pdb_id, seq) in tqdm(enumerate(seq_dict, 1)):
         seq = seq.replace("U", "X").replace("Z", "X").replace("O", "X")
         seq_len = len(seq)
         seq = " ".join(list(seq))
