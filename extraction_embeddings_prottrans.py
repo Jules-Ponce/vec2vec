@@ -63,6 +63,7 @@ def read_fasta(fasta_path):
     return sequences
 
 
+"""
 def get_embeddings(
     seq_path,
     emb_path,
@@ -70,7 +71,7 @@ def get_embeddings(
     per_protein,  # whether to derive per-protein (mean-pooled) embeddings
     max_residues=4000,  # number of cumulative residues per batch
     max_seq_len=1000,  # max length after which we switch to single-sequence processing to avoid OOM
-    max_batch=100,  # max number of sequences per single batch
+    max_batch=32,  # max number of sequences per single batch
 ):
 
     seq_dict = dict()
@@ -167,6 +168,113 @@ def get_embeddings(
     print(
         "Total time: {:.2f}[s]; time/prot: {:.4f}[s]; avg. len= {:.2f}".format(
             end - start, (end - start) / len(emb_dict), avg_length
+        )
+    )
+    return True
+"""
+
+# To make the code more RAM-efficient, we can process and save embeddings incrementally
+# instead of storing all embeddings in memory and saving them at the end.
+
+
+def get_embeddings(
+    seq_path,
+    emb_path,
+    model_dir,
+    per_protein,  # whether to derive per-protein (mean-pooled) embeddings
+    max_residues=4000,  # number of cumulative residues per batch
+    max_seq_len=1000,  # max length after which we switch to single-sequence processing to avoid OOM
+    max_batch=32,  # max number of sequences per single batch
+):
+
+    seq_dict = read_fasta(seq_path)
+    model, vocab = get_T5_model(model_dir)
+
+    print("########################################")
+    print(
+        "Example sequence: {}\n{}".format(
+            next(iter(seq_dict.keys())), next(iter(seq_dict.values()))
+        )
+    )
+    print("########################################")
+    print("Total number of sequences: {}".format(len(seq_dict)))
+
+    avg_length = sum([len(seq) for _, seq in seq_dict.items()]) / len(seq_dict)
+    n_long = sum([1 for _, seq in seq_dict.items() if len(seq) > max_seq_len])
+    seq_dict = sorted(
+        seq_dict.items(), key=lambda kv: len(seq_dict[kv[0]]), reverse=True
+    )
+
+    print("Average sequence length: {}".format(avg_length))
+    print("Number of sequences >{}: {}".format(max_seq_len, n_long))
+
+    start = time.time()
+    batch = list()
+
+    # Open the HDF5 file once and write embeddings incrementally
+    with h5py.File(str(emb_path), "w") as hf:
+        for seq_idx, (pdb_id, seq) in tqdm(enumerate(seq_dict, 1)):
+            seq = seq.replace("U", "X").replace("Z", "X").replace("O", "X")
+            seq_len = len(seq)
+            seq = " ".join(list(seq))
+            batch.append((pdb_id, seq, seq_len))
+
+            n_res_batch = sum([s_len for _, _, s_len in batch]) + seq_len
+            if (
+                len(batch) >= max_batch
+                or n_res_batch >= max_residues
+                or seq_idx == len(seq_dict)
+                or seq_len > max_seq_len
+            ):
+                pdb_ids, seqs, seq_lens = zip(*batch)
+                batch = list()
+
+                token_encoding = vocab.batch_encode_plus(
+                    seqs, add_special_tokens=True, padding="longest"
+                )
+                input_ids = torch.tensor(token_encoding["input_ids"]).to(device)
+                attention_mask = torch.tensor(token_encoding["attention_mask"]).to(
+                    device
+                )
+
+                try:
+                    with torch.no_grad():
+                        embedding_repr = model(input_ids, attention_mask=attention_mask)
+                except RuntimeError:
+                    print(
+                        "RuntimeError during embedding for {} (L={}). Try lowering batch size. ".format(
+                            pdb_id, seq_len
+                        )
+                        + "If single sequence processing does not work, you need more vRAM to process your protein."
+                    )
+                    continue
+
+                for batch_idx, identifier in enumerate(pdb_ids):
+                    s_len = seq_lens[batch_idx]
+                    emb = embedding_repr.last_hidden_state[batch_idx, :s_len]
+
+                    if per_protein:
+                        emb = emb.mean(dim=0)
+
+                    if seq_idx == 1 and batch_idx == 0:
+                        print(
+                            "Embedded protein {} with length {} to emb. of shape: {}".format(
+                                identifier, s_len, emb.shape
+                            )
+                        )
+
+                    # Save each embedding directly to the HDF5 file
+                    hf.create_dataset(
+                        identifier, data=emb.detach().cpu().numpy().squeeze()
+                    )
+
+    end = time.time()
+
+    print("\n############# STATS #############")
+    print("Total number of embeddings: {}".format(len(seq_dict)))
+    print(
+        "Total time: {:.2f}[s]; time/prot: {:.4f}[s]; avg. len= {:.2f}".format(
+            end - start, (end - start) / len(seq_dict), avg_length
         )
     )
     return True
