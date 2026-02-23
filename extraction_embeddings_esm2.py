@@ -3,6 +3,7 @@ import h5py
 import numpy as np
 from esm import pretrained, FastaBatchedDataset
 from pathlib import Path
+import gzip
 
 
 def extract_embeddings_streaming(
@@ -22,6 +23,17 @@ def extract_embeddings_streaming(
     model = model.to(device)
 
     print("Loading dataset...")
+
+    if fasta_file.endswith(".gz"):
+        import shutil
+        import tempfile
+
+        tmp = tempfile.NamedTemporaryFile(delete=False)
+        with gzip.open(fasta_file, "rb") as f_in:
+            shutil.copyfileobj(f_in, tmp)
+        tmp.close()
+        fasta_file = tmp.name
+
     dataset = FastaBatchedDataset.from_file(fasta_file)
     batches = dataset.get_batch_indices(tokens_per_batch, extra_toks_per_seq=1)
 
