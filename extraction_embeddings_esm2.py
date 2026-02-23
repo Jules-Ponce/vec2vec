@@ -89,3 +89,11 @@ def extract_embeddings_streaming(
                 torch.cuda.empty_cache()
 
         print(f"\nFinished. Stored {write_index} embeddings in {output_h5}")
+
+
+if __name__ == "__main__":
+    extract_embeddings_streaming(
+        model_name="esm2_t33_650M_UR50D",
+        fasta_file="/projects/bioinformatics/DB/uniprot/complete/uniprot_sprot.fasta.gz",
+        output_h5="embeddings/sprot_esm2.h5",
+    )
