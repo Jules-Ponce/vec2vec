@@ -4,6 +4,7 @@ import numpy as np
 from esm import pretrained, FastaBatchedDataset
 from pathlib import Path
 import gzip
+from tqdm import tqdm
 
 
 def extract_embeddings_streaming(
@@ -70,7 +71,7 @@ def extract_embeddings_streaming(
         write_index = 0
 
         with torch.no_grad():
-            for batch_idx, (labels, strs, toks) in enumerate(data_loader):
+            for batch_idx, (labels, strs, toks) in tqdm(enumerate(data_loader)):
 
                 print(f"Processing batch {batch_idx + 1}/{len(batches)}")
 
